@@ -2779,5 +2779,28 @@
             }
         }
     </script>
+    // C9 və sonrakı sınaqları avtomatik əlavə edən yamaq skripti
+    (function() {
+        // Ehtiyacın olan bütün əlavə sınaq kodlarını bura əlavə edə bilərsən
+        const extraTests = ["C9", "C10", "C11", "C12", "C13", "C14", "C15", "C16"];
+        
+        window.addEventListener('DOMContentLoaded', function() {
+            if (typeof AVAILABLE_TESTS !== 'undefined' && Array.isArray(AVAILABLE_TESTS)) {
+                extraTests.forEach(test => {
+                    if (!AVAILABLE_TESTS.includes(test)) {
+                        AVAILABLE_TESTS.push(test);
+                    }
+                });
+                console.log("Sınaq yamağı uğurla tətbiq olundu. Aktiv testlər:", AVAILABLE_TESTS);
+                
+                // Əgər səhifədə interfeysi / düymələri yenidən qurmaq üçün funksiya varsa, 
+                // avtomatik işə düşməsi üçün burdan çağıra bilərsən (məsələn: renderButtons();)
+            } else {
+                console.warn("AVAILABLE_TESTS massivi tapılmadı!");
+            }
+        });
+    })();
+</script>
+
 </body>
 </html>
