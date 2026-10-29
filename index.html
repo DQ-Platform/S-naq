@@ -1310,8 +1310,14 @@
                 };
                 const BLOCK = new Set(['P','DIV','TABLE','TR','UL','OL','H1','H2','H3','H4','H5','H6']);
                 const parseRich = (raw) => {
-                    const src = String(raw == null ? '' : raw);
-                    if (!RICH_RE.test(src)) return src.trim() ? [{ t: 'text', v: src.trim() }] : [];
+                    let src = String(raw == null ? '' : raw);
+                    const decodeEnt = (t) => { const ta = document.createElement('textarea'); ta.innerHTML = t; return ta.value; };
+                    // &lt;p&gt; kimi iki dəfə kodlanmış HTML-i əvvəlcə açır
+                    for (let k = 0; k < 3 && !RICH_RE.test(src) && /&(lt|gt|amp);/i.test(src); k++) src = decodeEnt(src);
+                    if (!RICH_RE.test(src)) {
+                        const pt = /&[a-z#0-9]+;/i.test(src) ? decodeEnt(src) : src;
+                        return pt.trim() ? [{ t: 'text', v: pt.trim() }] : [];
+                    }
                     const doc = new DOMParser().parseFromString(src, 'text/html');
                     const items = [];
                     let buf = '';
