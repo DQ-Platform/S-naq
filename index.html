@@ -1243,7 +1243,7 @@
                         im.onload = () => {
                             clearTimeout(to);
                             try {
-                                const sc = Math.min(1, 900 / (im.naturalWidth || 900));
+                                const sc = Math.min(1, 1200 / (im.naturalWidth || 1200));
                                 const cw = Math.max(1, Math.round(im.naturalWidth * sc));
                                 const ch = Math.max(1, Math.round(im.naturalHeight * sc));
                                 const cv = document.createElement('canvas');
@@ -1251,7 +1251,7 @@
                                 const cx = cv.getContext('2d');
                                 cx.fillStyle = '#fff'; cx.fillRect(0, 0, cw, ch);
                                 cx.drawImage(im, 0, 0, cw, ch);
-                                resolve({ data: cv.toDataURL('image/jpeg', 0.8), w: cw, h: ch });
+                                resolve({ data: cv.toDataURL('image/jpeg', 0.88), w: cw, h: ch });
                             } catch (e) { resolve(null); }
                         };
                         im.onerror = () => { clearTimeout(to); resolve(null); };
@@ -1299,6 +1299,85 @@
                     return [w, h];
                 };
 
+
+                // ---- HTML-li sual/variant mətnini təmiz mətn + şəkil bloklarına çevirir ----
+                const RICH_RE = /<\/?(p|br|img|div|span|b|i|u|strong|em|sub|sup|table|tr|td|th|ul|ol|li|h[1-6])\b/i;
+                const SUBM = { '0':'₀','1':'₁','2':'₂','3':'₃','4':'₄','5':'₅','6':'₆','7':'₇','8':'₈','9':'₉','+':'₊','-':'₋','=':'₌','(':'₍',')':'₎' };
+                const SUPM = { '0':'⁰','1':'¹','2':'²','3':'³','4':'⁴','5':'⁵','6':'⁶','7':'⁷','8':'⁸','9':'⁹','+':'⁺','-':'⁻','=':'⁼','(':'⁽',')':'⁾','n':'ⁿ' };
+                const toScript = (txt, map, pre) => {
+                    const t = txt.trim();
+                    return [...t].every(ch => map[ch]) ? [...t].map(ch => map[ch]).join('') : pre + t;
+                };
+                const BLOCK = new Set(['P','DIV','TABLE','TR','UL','OL','H1','H2','H3','H4','H5','H6']);
+                const parseRich = (raw) => {
+                    const src = String(raw == null ? '' : raw);
+                    if (!RICH_RE.test(src)) return src.trim() ? [{ t: 'text', v: src.trim() }] : [];
+                    const doc = new DOMParser().parseFromString(src, 'text/html');
+                    const items = [];
+                    let buf = '';
+                    const flush = () => {
+                        const v = buf.split('\n').map(l => l.replace(/[ \t\u00a0]+/g, ' ').trim()).join('\n').replace(/\n{3,}/g, '\n\n').trim();
+                        if (v) items.push({ t: 'text', v });
+                        buf = '';
+                    };
+                    const walk = (n) => {
+                        if (n.nodeType === 3) { buf += n.nodeValue.replace(/[\r\n\t ]+/g, ' '); return; }
+                        if (n.nodeType !== 1) return;
+                        const tag = n.tagName;
+                        if (tag === 'SCRIPT' || tag === 'STYLE') return;
+                        if (tag === 'IMG') {
+                            const sr = n.getAttribute('src');
+                            if (sr) { flush(); items.push({ t: 'img', src: sr }); }
+                            return;
+                        }
+                        if (tag === 'BR') { buf += '\n'; return; }
+                        if (tag === 'SUB') { buf += toScript(n.textContent, SUBM, '_'); return; }
+                        if (tag === 'SUP') { buf += toScript(n.textContent, SUPM, '^'); return; }
+                        const blk = BLOCK.has(tag);
+                        if (blk) buf += '\n';
+                        if (tag === 'LI') buf += '\n• ';
+                        n.childNodes.forEach(walk);
+                        if (tag === 'TD' || tag === 'TH') buf += '   ';
+                        if (blk) buf += '\n';
+                    };
+                    walk(doc.body);
+                    flush();
+                    return items;
+                };
+                const plainText = (raw) => parseRich(raw).filter(i => i.t === 'text').map(i => i.v).join(' ');
+                let imgFail = 0;
+                // mətni sətirlərə, şəkli ölçüyə hazırlayır; prefix ilk mətnin əvvəlinə yazılır
+                const prepRich = async (raw, prefix, width, style, size, imgMaxW, imgMaxH) => {
+                    let items = parseRich(raw);
+                    if (prefix) {
+                        if (items.length && items[0].t === 'text') items[0].v = prefix + ' ' + items[0].v;
+                        else items.unshift({ t: 'text', v: prefix });
+                    }
+                    const out = [];
+                    for (const it of items) {
+                        if (it.t === 'text') {
+                            out.push({ t: 'text', lines: it.v.split('\n').flatMap(p => p === '' ? [''] : wrap(p, width, style, size)) });
+                        } else if (withImg) {
+                            const im = await loadImg(it.src);
+                            if (im) out.push({ t: 'img', im, dim: imgSize(im, imgMaxW, imgMaxH) });
+                            else imgFail++;
+                        }
+                    }
+                    return out;
+                };
+                const richHeight = (blocks) => blocks.reduce((h, b) => h + (b.t === 'text' ? b.lines.length * LH : b.dim[1] + 3), 0);
+                const drawRich = (blocks, x, style, size, color, imgX) => {
+                    blocks.forEach(b => {
+                        if (b.t === 'text') {
+                            drawLines(b.lines, x, style, size, color);
+                        } else {
+                            ensure(b.dim[1] + 2);
+                            pdf.addImage(b.im.data, 'JPEG', imgX, y + 1, b.dim[0], b.dim[1]);
+                            y += b.dim[1] + 3;
+                        }
+                    });
+                };
+
                 let done = 0;
                 for (const [k, list] of groups) {
                     const [ex, ct] = k.split('|');
@@ -1332,51 +1411,48 @@
                             lastSubject = q.subject;
                         }
 
-                        const qLines = wrap(`${q.q_number}. ${q.question || ''}`, W, 'bold', FS);
-                        const qImg = (withImg && q.image_url) ? await loadImg(q.image_url) : null;
-                        const qImgDim = qImg ? imgSize(qImg, W, 70) : null;
+                        const qBlocks = await prepRich(q.question, `${q.q_number}.`, W, 'bold', FS, W, 90);
+                        if (withImg && q.image_url) {
+                            const qi = await loadImg(q.image_url);
+                            if (qi) qBlocks.push({ t: 'img', im: qi, dim: imgSize(qi, W, 90) }); else imgFail++;
+                        }
 
                         const optBlocks = [];
                         if (isOpen) {
-                            keyOpen.push(`${q.q_number}: ${opts[0] ? opts[0].text : ''}`);
+                            keyOpen.push(`${q.q_number}: ${opts[0] ? plainText(opts[0].text) : ''}`);
                         } else {
                             const c = Number(q.correct);
                             for (let i = 0; i < opts.length; i++) {
                                 const o = opts[i];
                                 const right = markCorrect && i === c;
-                                const lines = wrap(`${letters[i] || (i + 1)}) ${o.text}${right ? '  ✔' : ''}`, W - 6, right ? 'bold' : 'normal', FS);
-                                const oi = (withImg && o.image) ? await loadImg(o.image) : null;
-                                optBlocks.push({ lines, right, oi, dim: oi ? imgSize(oi, 60, 22) : null });
+                                const blocks = await prepRich(o.text, `${letters[i] || (i + 1)})`, W - 6, right ? 'bold' : 'normal', FS, 100, 50);
+                                if (right) {
+                                    const last = [...blocks].reverse().find(bk => bk.t === 'text');
+                                    if (last && last.lines.length) last.lines[last.lines.length - 1] += '  ✔';
+                                }
+                                if (withImg && o.image) {
+                                    const oi = await loadImg(o.image);
+                                    if (oi) blocks.push({ t: 'img', im: oi, dim: imgSize(oi, 100, 50) }); else imgFail++;
+                                }
+                                optBlocks.push({ blocks, right });
                             }
                             keyClosed.push(`${q.q_number}-${letters[c] || '?'}`);
                         }
 
                         // Sual bir səhifəyə sığırsa, bütöv saxla
-                        let H = qLines.length * LH + (qImgDim ? qImgDim[1] + 3 : 0) + 3;
+                        let H = richHeight(qBlocks) + 3;
                         if (isOpen) H += LH + 2;
-                        optBlocks.forEach(ob => { H += ob.lines.length * LH + (ob.dim ? ob.dim[1] + 1.5 : 0); });
+                        optBlocks.forEach(ob => { H += richHeight(ob.blocks); });
                         if (y + H > BOTTOM && H <= (BOTTOM - M)) newPage();
 
-                        drawLines(qLines, M, 'bold', FS);
-                        if (qImg) {
-                            ensure(qImgDim[1] + 2);
-                            pdf.addImage(qImg.data, 'JPEG', M, y + 1, qImgDim[0], qImgDim[1]);
-                            y += qImgDim[1] + 3;
-                        }
+                        drawRich(qBlocks, M, 'bold', FS, null, M);
                         if (isOpen) {
                             setF('normal', FS, [68, 68, 68]);
                             ensure(LH + 2);
                             pdf.text('Cavab: ______________________', M + 6, y + 4.6);
                             y += LH + 2;
                         } else {
-                            optBlocks.forEach(ob => {
-                                drawLines(ob.lines, M + 6, ob.right ? 'bold' : 'normal', FS, ob.right ? [21, 128, 61] : null);
-                                if (ob.oi) {
-                                    ensure(ob.dim[1] + 1.5);
-                                    pdf.addImage(ob.oi.data, 'JPEG', M + 8, y + 0.5, ob.dim[0], ob.dim[1]);
-                                    y += ob.dim[1] + 1.5;
-                                }
-                            });
+                            optBlocks.forEach(ob => drawRich(ob.blocks, M + 6, ob.right ? 'bold' : 'normal', FS, ob.right ? [21, 128, 61] : null, M + 8));
                         }
                         y += 3;
 
@@ -1408,7 +1484,7 @@
 
                 const fname = 'DQ_' + (exam === 'all' ? 'Butun-sinaqlar' : 'Sinaq' + exam) + '_' + (cat === 'all' ? 'Butun-kateqoriyalar' : cat) + '.pdf';
                 pdf.save(fname);
-                status.textContent = `✅ ${rows.length} sual, ${total} səhifə. Fayl yükləndi: ${fname}`;
+                status.textContent = `✅ ${rows.length} sual, ${total} səhifə. Fayl yükləndi: ${fname}` + (imgFail ? ` (⚠️ ${imgFail} şəkil yüklənmədi)` : '');
             } catch (err) {
                 status.textContent = '❌ Xəta: ' + (err.message || err);
             }
@@ -2779,28 +2855,5 @@
             }
         }
     </script>
-    // C9 və sonrakı sınaqları avtomatik əlavə edən yamaq skripti
-    (function() {
-        // Ehtiyacın olan bütün əlavə sınaq kodlarını bura əlavə edə bilərsən
-        const extraTests = ["C9", "C10", "C11", "C12", "C13", "C14", "C15", "C16"];
-        
-        window.addEventListener('DOMContentLoaded', function() {
-            if (typeof AVAILABLE_TESTS !== 'undefined' && Array.isArray(AVAILABLE_TESTS)) {
-                extraTests.forEach(test => {
-                    if (!AVAILABLE_TESTS.includes(test)) {
-                        AVAILABLE_TESTS.push(test);
-                    }
-                });
-                console.log("Sınaq yamağı uğurla tətbiq olundu. Aktiv testlər:", AVAILABLE_TESTS);
-                
-                // Əgər səhifədə interfeysi / düymələri yenidən qurmaq üçün funksiya varsa, 
-                // avtomatik işə düşməsi üçün burdan çağıra bilərsən (məsələn: renderButtons();)
-            } else {
-                console.warn("AVAILABLE_TESTS massivi tapılmadı!");
-            }
-        });
-    })();
-</script>
-
 </body>
 </html>
