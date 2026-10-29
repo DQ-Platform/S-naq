@@ -471,6 +471,7 @@
                 <div class="admin-nav-card" onclick="switchAdminTab('suallar')"><span class="icon">📝</span> Suallar Modulu</div>
                 <div class="admin-nav-card" onclick="switchAdminTab('sualbanki')"><span class="icon">📄</span> Sual Bankı (PDF)</div>
                 <div class="admin-nav-card" onclick="switchAdminTab('sualbankiv2')"><span class="icon">🧩</span> Sual Bankı V2</div>
+                <div class="admin-nav-card" onclick="switchAdminTab('pdfexport')"><span class="icon">⬇️</span> Suallar → PDF</div>
                 <div class="admin-nav-card" onclick="switchAdminTab('sablonlar')"><span class="icon">📋</span> Şablonlar</div>
                 <div class="admin-nav-card" onclick="switchAdminTab('idare')"><span class="icon">⚙️</span> İdarə & Ayarlar</div>
                 <div class="admin-nav-card" onclick="switchAdminTab('kabinet')"><span class="icon">👤</span> Şəxsi Kabinet</div>
@@ -684,6 +685,38 @@
                     </select>
                 </div>
                 <button class="btn btn-success" style="width: 100%;">+ Şəkilli Məntiq Sualını Bazaya Əlavə Et</button>
+            </div>
+
+            <!-- MODUL: SUALLARI PDF-Ə ÇEVİR -->
+            <div id="mod-pdfexport" class="admin-module-block">
+                <h4>⬇️ Bazadakı Sualları PDF-ə Çevir</h4>
+                <p class="mt-1 mb-3" style="color:#64748b;font-size:13px;">Sınaq və kateqoriyanı seçin, bazadakı suallar PDF kimi hazırlanıb yüklənəcək.</p>
+                <div class="form-group">
+                    <label>Sınaq:</label>
+                    <select class="form-control" id="pdfExamSel">
+                        <option value="all">Hamısı (1, 2, 3, 4)</option>
+                        <option value="1">Sınaq 1</option>
+                        <option value="2">Sınaq 2</option>
+                        <option value="3">Sınaq 3</option>
+                        <option value="4">Sınaq 4</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Kateqoriya:</label>
+                    <select class="form-control" id="pdfCatSel">
+                        <option value="all">Hamısı (BA, BB, AC)</option>
+                        <option value="BA">BA</option>
+                        <option value="BB">BB</option>
+                        <option value="AC">AC</option>
+                    </select>
+                </div>
+                <div class="form-group" style="display:flex;flex-direction:column;gap:8px;">
+                    <label style="font-weight:normal;"><input type="checkbox" id="pdfOptMark"> Düzgün cavabı sualın daxilində işarələ (müəllim variantı)</label>
+                    <label style="font-weight:normal;"><input type="checkbox" id="pdfOptKey" checked> Sonda cavab açarı əlavə et</label>
+                    <label style="font-weight:normal;"><input type="checkbox" id="pdfOptImg" checked> Şəkilləri daxil et</label>
+                </div>
+                <button class="btn btn-success" style="width:100%;" onclick="exportQuestionsToPdf()">📄 PDF-ə Çevir və Yüklə</button>
+                <p id="pdfExportStatus" class="mt-2" style="font-size:13px;color:#475569;"></p>
             </div>
 
             <!-- MODUL 1.3: İMTAHAN ŞABLONLARI -->
@@ -1073,6 +1106,142 @@
                 }
             } else {
                 showScreen("login-screen");
+            }
+        }
+
+        // ===== SUALLARI PDF-Ə ÇEVİR =====
+        function pdfEsc(v) {
+            return String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        }
+
+        async function exportQuestionsToPdf() {
+            const exam = document.getElementById('pdfExamSel').value;
+            const cat = document.getElementById('pdfCatSel').value;
+            const markCorrect = document.getElementById('pdfOptMark').checked;
+            const withKey = document.getElementById('pdfOptKey').checked;
+            const withImg = document.getElementById('pdfOptImg').checked;
+            const status = document.getElementById('pdfExportStatus');
+
+            // Pəncərə klikin içində açılmalıdır, yoxsa telefon/brauzer bloklayır
+            const w = window.open('', '_blank');
+            if (!w) {
+                status.textContent = '⚠️ Brauzer yeni pəncərəni blokladı. Bu sayt üçün popup-lara icazə verib yenidən basın.';
+                return;
+            }
+            w.document.write('<p style="font-family:Arial;padding:20px">Suallar yüklənir...</p>');
+            status.textContent = 'Bazadan suallar oxunur...';
+
+            try {
+                let rows = [];
+                let from = 0;
+                const step = 500;
+                while (true) {
+                    let q = _supabase.from('exam_questions').select('*');
+                    if (exam !== 'all') q = q.eq('exam_id', exam);
+                    if (cat !== 'all') q = q.eq('category', cat);
+                    const { data, error } = await q.order('exam_id').order('category').order('q_number').range(from, from + step - 1);
+                    if (error) throw error;
+                    rows = rows.concat(data || []);
+                    if (!data || data.length < step) break;
+                    from += step;
+                }
+
+                if (!rows.length) {
+                    w.close();
+                    status.textContent = '⚠️ Seçilmiş sınaq/kateqoriya üçün bazada sual tapılmadı.';
+                    return;
+                }
+
+                const groups = new Map();
+                rows.forEach(r => {
+                    const k = r.exam_id + '|' + r.category;
+                    if (!groups.has(k)) groups.set(k, []);
+                    groups.get(k).push(r);
+                });
+
+                const letters = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'];
+                const normOpts = (raw) => {
+                    let o = raw;
+                    if (typeof o === 'string') { try { o = JSON.parse(o); } catch (e) { o = []; } }
+                    if (!Array.isArray(o)) o = [];
+                    return o.map(x => (typeof x === 'string') ? { text: x, image: null } : { text: (x && x.text) || '', image: (x && x.image) || null });
+                };
+
+                let body = '';
+                groups.forEach((list, k) => {
+                    const [ex, ct] = k.split('|');
+                    body += `<section class="grp"><h1>DQ Platform — Sınaq ${pdfEsc(ex)} — ${pdfEsc(ct)} kateqoriyası</h1><div class="sub">${list.length} sual</div>`;
+                    let lastSubject = null;
+                    const keyClosed = [];
+                    const keyOpen = [];
+
+                    list.forEach(q => {
+                        const opts = normOpts(q.options);
+                        const isOpen = opts.length <= 1;
+                        if (q.subject && q.subject !== lastSubject) {
+                            body += `<h2>${pdfEsc(q.subject)}</h2>`;
+                            lastSubject = q.subject;
+                        }
+                        body += `<div class="q"><div class="qt"><b>${pdfEsc(q.q_number)}.</b> ${pdfEsc(q.question)}</div>`;
+                        if (withImg && q.image_url) body += `<img class="qi" src="${pdfEsc(q.image_url)}">`;
+
+                        if (isOpen) {
+                            body += `<div class="open">Cavab: ____________________</div>`;
+                            keyOpen.push(`${q.q_number}: ${pdfEsc(opts[0] ? opts[0].text : '')}`);
+                        } else {
+                            const c = Number(q.correct);
+                            opts.forEach((o, i) => {
+                                const isRight = markCorrect && i === c;
+                                body += `<div class="opt${isRight ? ' right' : ''}"><b>${letters[i] || (i + 1)})</b> ${pdfEsc(o.text)}${isRight ? ' ✔' : ''}`;
+                                if (withImg && o.image) body += ` <img class="oi" src="${pdfEsc(o.image)}">`;
+                                body += `</div>`;
+                            });
+                            keyClosed.push(`${q.q_number}-${letters[c] || '?'}`);
+                        }
+                        body += `</div>`;
+                    });
+
+                    if (withKey) {
+                        body += `<div class="key"><h2>Cavab açarı</h2>`;
+                        if (keyClosed.length) body += `<p>${keyClosed.join(' &nbsp; ')}</p>`;
+                        if (keyOpen.length) body += `<p><b>Açıq suallar:</b><br>${keyOpen.join('<br>')}</p>`;
+                        body += `</div>`;
+                    }
+                    body += `</section>`;
+                });
+
+                const html = `<!DOCTYPE html><html lang="az"><head><meta charset="utf-8"><title>DQ Platform - Suallar</title>
+<style>
+@page { size: A4; margin: 15mm; }
+body { font-family: Arial, "DejaVu Sans", sans-serif; font-size: 12.5px; line-height: 1.5; color: #111; }
+.grp { page-break-before: always; }
+.grp:first-child { page-break-before: auto; }
+h1 { font-size: 18px; margin: 0 0 2px; color: #1e3a8a; }
+.sub { color: #555; margin-bottom: 10px; }
+h2 { font-size: 14px; background: #eef2ff; padding: 5px 8px; margin: 14px 0 8px; border-left: 4px solid #4f46e5; }
+.q { page-break-inside: avoid; margin-bottom: 12px; }
+.qt { white-space: pre-line; margin-bottom: 4px; }
+.opt { margin-left: 18px; margin-bottom: 2px; }
+.opt.right { font-weight: bold; color: #15803d; }
+.open { margin-left: 18px; margin-top: 6px; color: #444; }
+.qi { max-width: 100%; max-height: 260px; display: block; margin: 6px 0; }
+.oi { max-height: 70px; vertical-align: middle; }
+.key { page-break-before: always; }
+.key p { line-height: 2; }
+</style></head><body>${body}</body></html>`;
+
+                w.document.open();
+                w.document.write(html);
+                w.document.close();
+
+                const imgs = Array.from(w.document.images).map(im => im.complete ? Promise.resolve() : new Promise(r => { im.onload = im.onerror = r; }));
+                await Promise.all(imgs);
+                status.textContent = `✅ ${rows.length} sual hazırlandı. Açılan pəncərədə "PDF kimi saxla" seçin.`;
+                w.focus();
+                setTimeout(() => w.print(), 400);
+            } catch (err) {
+                try { w.close(); } catch (e) {}
+                status.textContent = '❌ Xəta: ' + (err.message || err);
             }
         }
 
