@@ -7,6 +7,8 @@
     <title>DQ Platform - Mərkəzi İdarəetmə və Sınaq Sistemi</title>
     <!-- External Libraries -->
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     
     <style>
@@ -690,7 +692,7 @@
             <!-- MODUL: SUALLARI PDF-Ə ÇEVİR -->
             <div id="mod-pdfexport" class="admin-module-block">
                 <h4>⬇️ Bazadakı Sualları PDF-ə Çevir</h4>
-                <p class="mt-1 mb-3" style="color:#64748b;font-size:13px;">Sınaq və kateqoriyanı seçin, bazadakı suallar PDF kimi hazırlanıb yüklənəcək.</p>
+                <p class="mt-1 mb-3" style="color:#64748b;font-size:13px;">Sınaq və kateqoriyanı seçin, suallar çap pəncərəsi olmadan birbaşa PDF faylı kimi yüklənəcək.</p>
                 <div class="form-group">
                     <label>Sınaq:</label>
                     <select class="form-control" id="pdfExamSel">
@@ -1122,16 +1124,19 @@
             const withImg = document.getElementById('pdfOptImg').checked;
             const status = document.getElementById('pdfExportStatus');
 
-            // Pəncərə klikin içində açılmalıdır, yoxsa telefon/brauzer bloklayır
-            const w = window.open('', '_blank');
-            if (!w) {
-                status.textContent = '⚠️ Brauzer yeni pəncərəni blokladı. Bu sayt üçün popup-lara icazə verib yenidən basın.';
+            if (!window.jspdf || !window.html2canvas) {
+                status.textContent = '⚠️ PDF kitabxanaları yüklənməyib. İnternetə qoşulub səhifəni yeniləyin.';
                 return;
             }
-            w.document.write('<p style="font-family:Arial;padding:20px">Suallar yüklənir...</p>');
-            status.textContent = 'Bazadan suallar oxunur...';
+
+            let overlay = null, stage = null;
+            const waitImgs = (root) => Promise.all(Array.from(root.querySelectorAll('img')).map(im =>
+                im.complete ? Promise.resolve() : new Promise(r => { im.onload = im.onerror = r; setTimeout(r, 15000); })
+            ));
+            const tick = () => new Promise(r => setTimeout(r, 0));
 
             try {
+                status.textContent = 'Bazadan suallar oxunur...';
                 let rows = [];
                 let from = 0;
                 const step = 500;
@@ -1145,9 +1150,7 @@
                     if (!data || data.length < step) break;
                     from += step;
                 }
-
                 if (!rows.length) {
-                    w.close();
                     status.textContent = '⚠️ Seçilmiş sınaq/kateqoriya üçün bazada sual tapılmadı.';
                     return;
                 }
@@ -1167,10 +1170,20 @@
                     return o.map(x => (typeof x === 'string') ? { text: x, image: null } : { text: (x && x.text) || '', image: (x && x.image) || null });
                 };
 
-                let body = '';
+                // Bloklar (səhifələrə bölünəcək hissələr)
+                const blocks = [];
+                let pending = '';
+                let nextBrk = false;
+                const push = (html, brk) => {
+                    blocks.push({ html: pending + html, brk: !!(brk || nextBrk) });
+                    pending = '';
+                    nextBrk = false;
+                };
+
                 groups.forEach((list, k) => {
                     const [ex, ct] = k.split('|');
-                    body += `<section class="grp"><h1>DQ Platform — Sınaq ${pdfEsc(ex)} — ${pdfEsc(ct)} kateqoriyası</h1><div class="sub">${list.length} sual</div>`;
+                    pending += `<h1>DQ Platform — Sınaq ${pdfEsc(ex)} — ${pdfEsc(ct)} kateqoriyası</h1><div class="sub">${list.length} sual</div>`;
+                    nextBrk = true;
                     let lastSubject = null;
                     const keyClosed = [];
                     const keyOpen = [];
@@ -1179,69 +1192,108 @@
                         const opts = normOpts(q.options);
                         const isOpen = opts.length <= 1;
                         if (q.subject && q.subject !== lastSubject) {
-                            body += `<h2>${pdfEsc(q.subject)}</h2>`;
+                            pending += `<h2>${pdfEsc(q.subject)}</h2>`;
                             lastSubject = q.subject;
                         }
-                        body += `<div class="q"><div class="qt"><b>${pdfEsc(q.q_number)}.</b> ${pdfEsc(q.question)}</div>`;
-                        if (withImg && q.image_url) body += `<img class="qi" src="${pdfEsc(q.image_url)}">`;
-
+                        let h = `<div class="q"><div class="qt"><b>${pdfEsc(q.q_number)}.</b> ${pdfEsc(q.question)}</div>`;
+                        if (withImg && q.image_url) h += `<img class="qi" src="${pdfEsc(q.image_url)}">`;
                         if (isOpen) {
-                            body += `<div class="open">Cavab: ____________________</div>`;
+                            h += `<div class="open">Cavab: ____________________</div>`;
                             keyOpen.push(`${q.q_number}: ${pdfEsc(opts[0] ? opts[0].text : '')}`);
                         } else {
                             const c = Number(q.correct);
                             opts.forEach((o, i) => {
                                 const isRight = markCorrect && i === c;
-                                body += `<div class="opt${isRight ? ' right' : ''}"><b>${letters[i] || (i + 1)})</b> ${pdfEsc(o.text)}${isRight ? ' ✔' : ''}`;
-                                if (withImg && o.image) body += ` <img class="oi" src="${pdfEsc(o.image)}">`;
-                                body += `</div>`;
+                                h += `<div class="opt${isRight ? ' right' : ''}"><b>${letters[i] || (i + 1)})</b> ${pdfEsc(o.text)}${isRight ? ' ✔' : ''}`;
+                                if (withImg && o.image) h += ` <img class="oi" src="${pdfEsc(o.image)}">`;
+                                h += `</div>`;
                             });
                             keyClosed.push(`${q.q_number}-${letters[c] || '?'}`);
                         }
-                        body += `</div>`;
+                        h += `</div>`;
+                        push(h, false);
                     });
 
                     if (withKey) {
-                        body += `<div class="key"><h2>Cavab açarı</h2>`;
-                        if (keyClosed.length) body += `<p>${keyClosed.join(' &nbsp; ')}</p>`;
-                        if (keyOpen.length) body += `<p><b>Açıq suallar:</b><br>${keyOpen.join('<br>')}</p>`;
-                        body += `</div>`;
+                        let kh = `<h2>Cavab açarı — Sınaq ${pdfEsc(ex)} ${pdfEsc(ct)}</h2>`;
+                        if (keyClosed.length) kh += `<div class="keyp">${keyClosed.join(' &nbsp; ')}</div>`;
+                        if (keyOpen.length) kh += `<div class="keyp"><b>Açıq suallar:</b><br>${keyOpen.join('<br>')}</div>`;
+                        push(kh, true);
                     }
-                    body += `</section>`;
                 });
 
-                const html = `<!DOCTYPE html><html lang="az"><head><meta charset="utf-8"><title>DQ Platform - Suallar</title>
-<style>
-@page { size: A4; margin: 15mm; }
-body { font-family: Arial, "DejaVu Sans", sans-serif; font-size: 12.5px; line-height: 1.5; color: #111; }
-.grp { page-break-before: always; }
-.grp:first-child { page-break-before: auto; }
-h1 { font-size: 18px; margin: 0 0 2px; color: #1e3a8a; }
-.sub { color: #555; margin-bottom: 10px; }
-h2 { font-size: 14px; background: #eef2ff; padding: 5px 8px; margin: 14px 0 8px; border-left: 4px solid #4f46e5; }
-.q { page-break-inside: avoid; margin-bottom: 12px; }
-.qt { white-space: pre-line; margin-bottom: 4px; }
-.opt { margin-left: 18px; margin-bottom: 2px; }
-.opt.right { font-weight: bold; color: #15803d; }
-.open { margin-left: 18px; margin-top: 6px; color: #444; }
-.qi { max-width: 100%; max-height: 260px; display: block; margin: 6px 0; }
-.oi { max-height: 70px; vertical-align: middle; }
-.key { page-break-before: always; }
-.key p { line-height: 2; }
-</style></head><body>${body}</body></html>`;
+                // Tam ekran "hazırlanır" pərdəsi + görünməz səhifə səhnəsi
+                overlay = document.createElement('div');
+                overlay.style.cssText = 'position:fixed;inset:0;background:#fff;z-index:99999;display:flex;align-items:center;justify-content:center;font:16px Arial,sans-serif;color:#1e3a8a;text-align:center;padding:20px;';
+                overlay.textContent = 'PDF hazırlanır, gözləyin...';
+                stage = document.createElement('div');
+                stage.style.cssText = 'position:fixed;left:0;top:0;z-index:1;background:#fff;';
+                stage.innerHTML = `<style>
+                    .pdfp{width:794px;height:1123px;box-sizing:border-box;padding:40px;background:#fff;overflow:hidden;font-family:Arial,"DejaVu Sans",sans-serif;font-size:13px;line-height:1.5;color:#111;}
+                    .pdfp h1{font-size:19px;margin:0 0 2px;color:#1e3a8a;}
+                    .pdfp .sub{color:#555;margin-bottom:10px;}
+                    .pdfp h2{font-size:15px;background:#eef2ff;padding:5px 8px;margin:12px 0 8px;border-left:4px solid #4f46e5;}
+                    .pdfp .q{margin-bottom:12px;}
+                    .pdfp .qt{white-space:pre-line;margin-bottom:4px;}
+                    .pdfp .opt{margin-left:18px;margin-bottom:2px;}
+                    .pdfp .opt.right{font-weight:bold;color:#15803d;}
+                    .pdfp .open{margin-left:18px;margin-top:6px;color:#444;}
+                    .pdfp .qi{max-width:100%;max-height:260px;display:block;margin:6px 0;}
+                    .pdfp .oi{max-height:70px;vertical-align:middle;}
+                    .pdfp .keyp{line-height:2;margin-bottom:8px;}
+                </style>`;
+                document.body.appendChild(stage);
+                document.body.appendChild(overlay);
 
-                w.document.open();
-                w.document.write(html);
-                w.document.close();
+                const page = document.createElement('div');
+                page.className = 'pdfp';
+                stage.appendChild(page);
 
-                const imgs = Array.from(w.document.images).map(im => im.complete ? Promise.resolve() : new Promise(r => { im.onload = im.onerror = r; }));
-                await Promise.all(imgs);
-                status.textContent = `✅ ${rows.length} sual hazırlandı. Açılan pəncərədə "PDF kimi saxla" seçin.`;
-                w.focus();
-                setTimeout(() => w.print(), 400);
+                // Səhifələrə bölmə
+                const pagesHtml = [];
+                for (let i = 0; i < blocks.length; i++) {
+                    const b = blocks[i];
+                    if (b.brk && page.children.length) {
+                        pagesHtml.push(page.innerHTML);
+                        page.innerHTML = '';
+                    }
+                    const el = document.createElement('div');
+                    el.innerHTML = b.html;
+                    page.appendChild(el);
+                    await waitImgs(el);
+                    if (page.scrollHeight > page.clientHeight + 1 && page.children.length > 1) {
+                        page.removeChild(el);
+                        pagesHtml.push(page.innerHTML);
+                        page.innerHTML = '';
+                        page.appendChild(el);
+                    }
+                    if (i % 10 === 0) { overlay.textContent = `Suallar düzülür: ${i + 1}/${blocks.length}`; await tick(); }
+                }
+                if (page.children.length) pagesHtml.push(page.innerHTML);
+
+                // Hər səhifəni şəkilə çevirib PDF-ə yığırıq
+                const { jsPDF } = window.jspdf;
+                const pdf = new jsPDF({ unit: 'mm', format: 'a4', compress: true });
+                for (let i = 0; i < pagesHtml.length; i++) {
+                    overlay.textContent = `PDF hazırlanır: səhifə ${i + 1}/${pagesHtml.length}`;
+                    await tick();
+                    page.innerHTML = pagesHtml[i];
+                    await waitImgs(page);
+                    const canvas = await html2canvas(page, { scale: 2, useCORS: true, backgroundColor: '#ffffff', scrollX: 0, scrollY: 0 });
+                    const data = canvas.toDataURL('image/jpeg', 0.85);
+                    if (i > 0) pdf.addPage();
+                    pdf.addImage(data, 'JPEG', 0, 0, 210, 297);
+                    canvas.width = 0; canvas.height = 0;
+                }
+
+                const fname = 'DQ_' + (exam === 'all' ? 'Butun-sinaqlar' : 'Sinaq' + exam) + '_' + (cat === 'all' ? 'Butun-kateqoriyalar' : cat) + '.pdf';
+                pdf.save(fname);
+                status.textContent = `✅ ${rows.length} sual, ${pagesHtml.length} səhifə. Fayl yükləndi: ${fname}`;
             } catch (err) {
-                try { w.close(); } catch (e) {}
                 status.textContent = '❌ Xəta: ' + (err.message || err);
+            } finally {
+                if (overlay) overlay.remove();
+                if (stage) stage.remove();
             }
         }
 
